@@ -25,14 +25,14 @@ app.add_middleware(
 os.makedirs("tickets_data", exist_ok=True)
 
 class BuyTicketRequest(BaseModel):
-    user_name: str
-    user_id: str
-    event_details: str
+    name: str
+    unique_id: str
+    event_id: str
 
 class ResellTicketRequest(BaseModel):
     ticket_id: str
     new_owner_name: str
-    new_owner_id: str
+    new_owner_unique_id: str
 
 class ValidateTicketRequest(BaseModel):
     ticket_id: str
@@ -100,7 +100,7 @@ def generate_qr_code(ticket_id):
 @app.post("/buy-ticket")
 async def buy_ticket(request: BuyTicketRequest):
     private_key, public_key_pem = generate_keys()
-    ticket_details = f"{request.user_name}:{request.user_id}:{request.event_details}"
+    ticket_details = f"{request.name}:{request.unique_id}:{request.event_id}"
     ticket = generate_ticket(ticket_details, public_key_pem)
     signature = sign_ticket(private_key, ticket['ticket_hash'])
 
@@ -111,29 +111,19 @@ async def buy_ticket(request: BuyTicketRequest):
             "ticket": ticket,
             "signature": signature.hex(),
             "public_key_pem": public_key_pem,
-            "owner_name": request.user_name,
-            "owner_id": request.user_id,
+            "owner_name": request.name,
+            "owner_unique_id": request.unique_id,
             "transactions": [{
-                "owner_name": request.user_name,
-                "owner_id": request.user_id,
+                "owner_name": request.name,
+                "owner_unique_id": request.unique_id,
                 "action": "bought"
             }]
         }, f)
 
     generate_qr_code(ticket['ticket_id'])
 
-    ticket_text_details = f"""
-    Ticket ID: {ticket['ticket_id']}
-    Owner Name: {request.user_name}
-    Owner ID: {request.user_id}
-    Event Details: {request.event_details}
-    Ticket Hash: {ticket['ticket_hash']}
-    Public Key: {public_key_pem}
-    """
-
     return {
         "message": "Ticket purchased successfully",
-        "ticket_details": ticket_text_details.strip(),
         "ticket_id": ticket['ticket_id'],
         "qr_code_path": f"tickets_data/{ticket['ticket_id']}_qr.png"
     }
@@ -148,10 +138,10 @@ async def resell_ticket(request: ResellTicketRequest):
             ticket = data['ticket']
             original_ticket_hash = ticket['ticket_hash']
             original_owner_name = data['owner_name']
-            original_owner_id = data['owner_id']
+            original_owner_unique_id = data['owner_unique_id']
 
         # Update ticket details and hash with new owner
-        new_ticket_details = f"{request.new_owner_name}:{request.new_owner_id}:{ticket['details'].split(':', 2)[2]}"
+        new_ticket_details = f"{request.new_owner_name}:{request.new_owner_unique_id}:{ticket['details'].split(':', 2)[2]}"
         new_ticket_hash = hashlib.sha256(new_ticket_details.encode()).hexdigest()
 
         # Generate new keys for the new owner
@@ -170,14 +160,14 @@ async def resell_ticket(request: ResellTicketRequest):
             "signature": new_signature.hex(),
             "public_key_pem": new_public_key_pem,
             "owner_name": request.new_owner_name,
-            "owner_id": request.new_owner_id
+            "owner_unique_id": request.new_owner_unique_id
         })
         data["transactions"].append({
             "owner_name": request.new_owner_name,
-            "owner_id": request.new_owner_id,
+            "owner_unique_id": request.new_owner_unique_id,
             "action": "resold",
             "reseller_name": original_owner_name,
-            "reseller_id": original_owner_id
+            "reseller_unique_id": original_owner_unique_id
         })
 
         with open(ticket_file, "w") as f:
@@ -208,23 +198,13 @@ async def validate_ticket(request: ValidateTicketRequest):
     signature = bytes.fromhex(data['signature'])
     public_key_pem = data['public_key_pem']
 
-    # Check if resold
-    if 'original_ticket_hash' in ticket and ticket['ticket_hash'] != ticket['original_ticket_hash']:
-        reseller_name = data["transactions"][-1].get("reseller_name")
-        reseller_id = data["transactions"][-1].get("reseller_id")
-        return {
-            "message": "Ticket is invalid due to resale",
-            "reseller_name": reseller_name,
-            "reseller_id": reseller_id
-        }
-
     is_valid = verify_ownership(public_key_pem, ticket['ticket_hash'], signature, ticket['owner_public_key'])
     if is_valid:
         return {"message": "Ticket is valid"}
     else:
-        return {"message": "Ticket is invalid due to tampering"}
+        return {"message": "Ticket is invalid"}
 
-# New Endpoint to Get Ticket History
+# Endpoint to Get Ticket History
 @app.get("/ticket-history/{ticket_id}")
 async def ticket_history(ticket_id: str):
     ticket_file = f"tickets_data/{ticket_id}.json"
