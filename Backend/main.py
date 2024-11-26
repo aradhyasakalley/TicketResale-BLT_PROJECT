@@ -21,8 +21,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Ensure the tickets_data directory exists
+# Ensure the tickets_data directory and qr_code folder exist
 os.makedirs("tickets_data", exist_ok=True)
+os.makedirs("qr_code", exist_ok=True)
 
 class BuyTicketRequest(BaseModel):
     name: str
@@ -36,6 +37,10 @@ class ResellTicketRequest(BaseModel):
 
 class ValidateTicketRequest(BaseModel):
     ticket_id: str
+
+class TransferTicketRequest(BaseModel):
+    ticket_id: str
+    new_owner_name: str
 
 # Generate RSA key pair
 def generate_keys():
@@ -94,7 +99,7 @@ def verify_ownership(public_key_pem: str, ticket_hash: str, signature: bytes, or
 # Generate QR code for the ticket
 def generate_qr_code(ticket_id):
     qr = qrcode.make(ticket_id)
-    qr.save(f"tickets_data/{ticket_id}_qr.png")
+    qr.save(f"qr_code/{ticket_id}_qr.png")
 
 # Endpoint to Buy a Ticket
 @app.post("/buy-ticket")
@@ -125,7 +130,7 @@ async def buy_ticket(request: BuyTicketRequest):
     return {
         "message": "Ticket purchased successfully",
         "ticket_id": ticket['ticket_id'],
-        "qr_code_path": f"tickets_data/{ticket['ticket_id']}_qr.png"
+        "qr_code_path": f"qr_code/{ticket['ticket_id']}_qr.png"
     }
 
 # Endpoint to Resell a Ticket
@@ -148,7 +153,7 @@ async def resell_ticket(request: ResellTicketRequest):
         new_private_key, new_public_key_pem = generate_keys()
         new_signature = sign_ticket(new_private_key, new_ticket_hash)
 
-        # Update ticket data and add resale transaction history
+        # Invalidate previous ticket and add resale transaction history
         data.update({
             "ticket": {
                 "ticket_id": request.ticket_id,
@@ -170,6 +175,22 @@ async def resell_ticket(request: ResellTicketRequest):
             "reseller_unique_id": original_owner_unique_id
         })
 
+        # Mark the previous ticket as resold (invalidate it)
+        prev_ticket_file = f"tickets_data/{ticket['ticket_id']}_invalid.json"
+        with open(prev_ticket_file, "w") as f:
+            json.dump({
+                "ticket": ticket,
+                "signature": data['signature'],
+                "public_key_pem": data['public_key_pem'],
+                "owner_name": original_owner_name,
+                "owner_unique_id": original_owner_unique_id,
+                "transactions": [{
+                    "owner_name": original_owner_name,
+                    "owner_unique_id": original_owner_unique_id,
+                    "action": "resold"
+                }]
+            }, f)
+
         with open(ticket_file, "w") as f:
             json.dump(data, f)
 
@@ -178,7 +199,7 @@ async def resell_ticket(request: ResellTicketRequest):
         return {
             "message": "Ticket resold successfully",
             "new_ticket_hash": new_ticket_hash,
-            "qr_code_path": f"tickets_data/{request.ticket_id}_resold_qr.png"
+            "qr_code_path": f"qr_code/{request.ticket_id}_resold_qr.png"
         }
 
     except FileNotFoundError:
@@ -204,17 +225,66 @@ async def validate_ticket(request: ValidateTicketRequest):
     else:
         return {"message": "Ticket is invalid"}
 
-# Endpoint to Get Ticket History
-@app.get("/ticket-history/{ticket_id}")
-async def ticket_history(ticket_id: str):
+# Endpoint to Transfer a Ticket
+@app.post("/transfer-ticket")
+async def transfer_ticket(request: TransferTicketRequest):
+    ticket_file = f"tickets_data/{request.ticket_id}.json"
+    try:
+        with open(ticket_file, "r") as f:
+            data = json.load(f)
+            ticket = data['ticket']
+            original_owner_name = data['owner_name']
+            original_owner_unique_id = data['owner_unique_id']
+
+        # Update ticket details with new owner
+        new_ticket_details = f"{request.new_owner_name}:{original_owner_unique_id}:{ticket['details'].split(':', 2)[2]}"
+        new_ticket_hash = hashlib.sha256(new_ticket_details.encode()).hexdigest()
+
+        # Generate new keys for the new owner
+        new_private_key, new_public_key_pem = generate_keys()
+        new_signature = sign_ticket(new_private_key, new_ticket_hash)
+
+        # Update ticket data and add transfer transaction
+        data.update({
+            "ticket": {
+                "ticket_id": request.ticket_id,
+                "owner_public_key": new_public_key_pem,
+                "details": new_ticket_details,
+                "ticket_hash": new_ticket_hash
+            },
+            "signature": new_signature.hex(),
+            "public_key_pem": new_public_key_pem,
+            "owner_name": request.new_owner_name,
+            "owner_unique_id": original_owner_unique_id
+        })
+
+        data["transactions"].append({
+            "owner_name": request.new_owner_name,
+            "owner_unique_id": original_owner_unique_id,
+            "action": "transferred"
+        })
+
+        with open(ticket_file, "w") as f:
+            json.dump(data, f)
+
+        generate_qr_code(request.ticket_id + "_transferred")
+
+        return {
+            "message": "Ticket transferred successfully",
+            "qr_code_path": f"qr_code/{request.ticket_id}_transferred_qr.png"
+        }
+
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+
+# Endpoint to Get Transaction History of a Ticket
+@app.get("/transaction-history/{ticket_id}")
+async def transaction_history(ticket_id: str):
     ticket_file = f"tickets_data/{ticket_id}.json"
     try:
         with open(ticket_file, "r") as f:
             data = json.load(f)
-            history = data.get("transactions", [])
-            return {
-                "ticket_id": ticket_id,
-                "history": history
-            }
+        return {"transactions": data['transactions']}
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Ticket not found")
+
